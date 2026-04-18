@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Nexus Precision // GitHub Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <style>
+        :root { --neon: #00f2ff; --pink: #ff0077; }
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        #input_video { display: none; }
+        canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; object-fit: cover; }
+        
+        #boot-trigger {
+            position: absolute; width: 100%; height: 100%; background: radial-gradient(circle, #111 0%, #000 100%);
+            z-index: 2000; display: flex; align-items: center; justify-content: center;
+            color: var(--neon); cursor: pointer; text-align: center;
+        }
+
+        #menu {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            display: grid; grid-template-columns: repeat(4, 160px); gap: 25px; z-index: 10;
+        }
+
+        .btn {
+            width: 160px; height: 160px; background: rgba(0, 242, 255, 0.05);
+            border: 1px solid rgba(0, 242, 255, 0.2); border-radius: 20px;
+            display: flex; align-items: center; justify-content: center;
+            color: var(--neon); font-weight: bold; backdrop-filter: blur(10px); 
+            transition: all 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        #confirm-overlay {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.9); z-index: 500; display: none;
+            flex-direction: column; align-items: center; justify-content: center;
+        }
+
+        .confirm-box { border: 1px solid var(--neon); padding: 50px; border-radius: 30px; text-align: center; background: #000; }
+        .choice-row { display: flex; gap: 40px; margin-top: 40px; }
+        .choice-btn { width: 140px; height: 90px; border: 2px solid; border-radius: 15px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; }
+
+        #yes-btn { border-color: #00ff88; color: #00ff88; }
+        #no-btn { border-color: var(--pink); color: var(--pink); }
+
+        /* Smooth UI States */
+        .active { border-color: var(--neon); box-shadow: 0 0 20px var(--neon); background: rgba(0, 242, 255, 0.2); }
+        .yes-active { background: #00ff88; color: #000; box-shadow: 0 0 40px #00ff88; }
+        .no-active { background: var(--pink); color: #000; box-shadow: 0 0 40px var(--pink); }
+
+        #cursor {
+            position: absolute; width: 40px; height: 40px; border: 2px solid #fff;
+            border-radius: 50%; z-index: 10000; pointer-events: none;
+            transform: translate(-50%, -50%); display: none;
+            box-shadow: 0 0 15px var(--neon);
+            mix-blend-mode: difference;
+        }
+        
+        #progress-ring {
+            position: absolute; width: 60px; height: 60px; border: 4px solid var(--neon);
+            border-radius: 50%; border-top-color: transparent;
+            animation: spin 1s linear infinite; display: none; transform: translate(-50%, -50%);
+        }
+        @keyframes spin { from {transform: translate(-50%, -50%) rotate(0deg);} to {transform: translate(-50%, -50%) rotate(360deg);} }
+    </style>
+</head>
+<body>
+
+    <div id="boot-trigger" onclick="init()">
+        <h1>[ CONNECT TO NEXUS ]<br><span style="font-size: 0.9rem; opacity: 0.5; letter-spacing: 2px;">HAND_SYNC // VOICE_SYNC // CLAP_READY</span></h1>
+    </div>
+
+    <div id="cursor"></div>
+    <div id="progress-ring"></div>
+    <video id="vid"></video>
+    <canvas id="out"></canvas>
+
+    <div id="menu">
+        <div class="btn" data-url="https://www.google.com">GOOGLE</div>
+        <div class="btn" data-url="https://www.youtube.com">YOUTUBE</div>
+        <div class="btn" data-url="https://chat.openai.com">AI_LAB</div>
+        <div class="btn" data-url="https://www.github.com">GITHUB</div>
+        <div class="btn" data-url="https://www.netflix.com">NETFLIX</div>
+        <div class="btn" data-url="https://www.spotify.com">SPOTIFY</div>
+        <div class="btn" data-url="https://www.canva.com">DESIGN</div>
+        <div class="btn" data-url="https://www.gmail.com">GMAIL</div>
+    </div>
+
+    <div id="confirm-overlay">
+        <div class="confirm-box">
+            <h2 id="confirm-text" style="color: var(--neon); margin:0; letter-spacing: 4px;">INITIALIZE?</h2>
+            <div class="choice-row">
+                <div class="choice-btn" id="yes-btn">YES</div>
+                <div class="choice-btn" id="no-btn">NO</div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    const cursor = document.getElementById('cursor');
+    const ring = document.getElementById('progress-ring');
+    const overlay = document.getElementById('confirm-overlay');
+    const yesBtn = document.getElementById('yes-btn');
+    const noBtn = document.getElementById('no-btn');
+    let pendingUrl = "", isConfirming = false, lastTab = null;
+
+    function init() {
+        document.getElementById('boot-trigger').style.display = 'none';
+        initAudio();
+        cam.start();
+    }
+
+    async function initAudio() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const source = audioCtx.createMediaStreamSource(stream);
+            const processor = audioCtx.createScriptProcessor(1024, 1, 1);
+            source.connect(processor); processor.connect(audioCtx.destination);
+            processor.onaudioprocess = (e) => {
+                const input = e.inputBuffer.getChannelData(0);
+                let max = 0;
+                for (let i = 0; i < input.length; i++) if (input[i] > max) max = input[i];
+                if (max > 0.5 && lastTab) lastTab.focus(); 
+            };
+        } catch(e) {}
+    }
+
+    function onResults(results) {
+        const canvas = document.getElementById('out');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+
+        ctx.save();
+        ctx.scale(-1, 1); ctx.translate(-canvas.width, 0);
+        ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+        const hand = results.rightHandLandmarks || results.leftHandLandmarks;
+        if (hand) {
+            const x = (1 - hand[8].x) * window.innerWidth;
+            const y = hand[8].y * window.innerHeight;
+            
+            // UI Feedback
+            cursor.style.left = ring.style.left = `${x}px`;
+            cursor.style.top = ring.style.top = `${y}px`;
+            cursor.style.display = 'block';
+
+            const checkHover = (el, callback, activeClass) => {
+                const r = el.getBoundingClientRect();
+                if (x > r.left && x < r.right && y > r.top && y < r.bottom) {
+                    el.classList.add(activeClass);
+                    ring.style.display = 'block';
+                    if (!el.t) el.t = setTimeout(() => { callback(); resetTimer(el); }, 1000);
+                } else {
+                    el.classList.remove(activeClass);
+                    if (el.t) { clearTimeout(el.t); el.t = null; ring.style.display = 'none'; }
+                }
+            };
+
+            const resetTimer = (el) => { el.t = null; ring.style.display = 'none'; };
+
+            if (!isConfirming) {
+                document.querySelectorAll('.btn').forEach(btn => {
+                    checkHover(btn, () => {
+                        pendingUrl = btn.dataset.url;
+                        isConfirming = true;
+                        overlay.style.display = 'flex';
+                        document.getElementById('confirm-text').innerText = `LAUNCH ${btn.innerText}?`;
+                    }, 'active');
+                });
+            } else {
+                checkHover(yesBtn, () => {
+                    lastTab = window.open(pendingUrl, '_blank');
+                    window.focus();
+                    closeConfirm();
+                }, 'yes-active');
+
+                checkHover(noBtn, () => { closeConfirm(); }, 'no-active');
+            }
+        } else { cursor.style.display = ring.style.display = 'none'; }
+        ctx.restore();
+    }
+
+    function closeConfirm() { overlay.style.display = 'none'; isConfirming = false; }
+
+    const holistic = new Holistic({locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`});
+    holistic.setOptions({ modelComplexity: 0 });
+    holistic.onResults(onResults);
+
+    const cam = new Camera(document.getElementById('vid'), {
+        onFrame: async () => { await holistic.send({image: document.getElementById('vid')}); },
+        width: 1280, height: 720
+    });
+</script>
+</body>
+</html>
